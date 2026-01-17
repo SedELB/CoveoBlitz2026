@@ -1,38 +1,200 @@
 package codes.blitz.game.bot;
 
 import codes.blitz.game.generated.*;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Random;
+
+import java.util.*;
 
 public class Bot {
-  Random random = new Random();
+    Map<Spore, Position> sporesLockedIn;
+    Set<Position> positionsLockedIn;
 
-  public Bot() {
-    System.out.println("Initializing your super mega duper bot");
-  }
-
-  /*
-   * Here is where the magic happens, for now the moves are not very good. I bet you can do better ;)
-   */
-  public List<Action> getActions(TeamGameState gameMessage) {
-    List<Action> actions = new ArrayList<>();
-
-    TeamInfo myTeam = gameMessage.world().teamInfos().get(gameMessage.yourTeamId());
-    if (myTeam.spawners().isEmpty()) {
-      actions.add(new SporeCreateSpawnerAction(myTeam.spores().getFirst().id()));
-    } else if (myTeam.spores().isEmpty()) {
-      actions.add(new SpawnerProduceSporeAction(myTeam.spawners().getFirst().id(), 20));
-    } else {
-      actions.add(
-          new SporeMoveToAction(
-              myTeam.spores().getFirst().id(),
-              new Position(
-                  random.nextInt(gameMessage.world().map().width()),
-                  random.nextInt(gameMessage.world().map().height()))));
+    public Bot() {
+        sporesLockedIn = new HashMap<Spore, Position>();
+        positionsLockedIn = new HashSet<Position>();
+        System.out.println("Initializing our super mega duper bot");
     }
 
-    // You can clearly do better than the random actions above. Have fun!!
-    return actions;
-  }
+    /*
+     * Stratégie améliorée pour maximiser la capture de tiles
+     */
+    public List<Action> getActions(TeamGameState gameMessage) {
+        List<Action> actions = new ArrayList<>();
+        TeamInfo myTeam = gameMessage.world().teamInfos().get(gameMessage.yourTeamId());
+        GameWorld world = gameMessage.world();
+        String myTeamId = gameMessage.yourTeamId();
+        int biomasse = calculateBiomass(myTeam);
+        int forceDesTroupes = world.spawners().isEmpty() ? 1 : Math.max(3, biomasse / world.spawners().size());
+
+        // Spawn de nouvelles spores
+        spawn(myTeam, actions, forceDesTroupes);
+
+        // Créer des spawners stratégiquement (pas trop tôt)
+        if (myTeam.nutrients() >= myTeam.nextSpawnerCost() && myTeam.spawners().size() < 5) {
+            Spore bestSporeForSpawner = findBestSporeForSpawner(myTeam, world, myTeamId);
+            if (bestSporeForSpawner != null) {
+                actions.add(new SporeCreateSpawnerAction(bestSporeForSpawner.id()));
+            }
+        }
+
+        // Réinitialiser les positions verrouillées chaque tour
+        positionsLockedIn.clear();
+
+        // Mouvement vers tiles non contrôlées
+        for (Spore spore : myTeam.spores()) {
+            if (spore.biomass() >= 2) { // Seulement les spores actives
+                Position target = findBestTileToCapture(spore, world, myTeamId);
+                if (target != null) {
+                    actions.add(new SporeMoveToAction(spore.id(), target));
+                    positionsLockedIn.add(target);
+                }
+            }
+        }
+
+        return actions;
+    }
+
+    /**
+     * Trouve la meilleure tile à capturer pour une spore donnée
+     * Priorise : haute valeur nutritive, proximité, tiles non contrôlées
+     */
+    private Position findBestTileToCapture(Spore spore, GameWorld world, String myTeamId) {
+        Position bestPosition = null;
+        double bestScore = -1;
+
+        int width = world.map().width();
+        int height = world.map().height();
+
+        // Chercher dans un rayon raisonnable autour de la spore
+        int searchRadius = 15;
+
+        for (int x = Math.max(0, spore.position().x() - searchRadius);
+             x < Math.min(width, spore.position().x() + searchRadius); x++) {
+            for (int y = Math.max(0, spore.position().y() - searchRadius);
+                 y < Math.min(height, spore.position().y() + searchRadius); y++) {
+
+                Position pos = new Position(x, y);
+
+                // Vérifier si la tile n'est pas déjà contrôlée par nous
+                String owner = world.ownershipGrid()[x][y];
+                if (owner != null && owner.equals(myTeamId)) {
+                    continue; // Déjà contrôlée
+                }
+
+                // Éviter les positions déjà ciblées par d'autres spores
+                if (positionsLockedIn.contains(pos)) {
+                    continue;
+                }
+
+                // Calculer le score de cette position
+                double distance = calculateDistance(spore.position(), pos);
+                if (distance == 0) continue;
+
+                int nutrientValue = world.map().nutrientGrid()[x][y];
+
+                // Score = valeur nutritive / distance (prioriser les tiles proches avec haute valeur)
+                double score = (nutrientValue + 1) / (distance + 1);
+
+                // Bonus si la tile n'est contrôlée par personne
+                if (owner == null || owner.isEmpty()) {
+                    score *= 1.5;
+                }
+
+                // Bonus si c'est une tile avec spore neutre faible
+                boolean hasWeakNeutral = false;
+                for (Spore neutralSpore : world.spores()) {
+                    if (neutralSpore.teamId() == null &&
+                            neutralSpore.position().equals(pos) &&
+                            neutralSpore.biomass() < spore.biomass()) {
+                        hasWeakNeutral = true;
+                        break;
+                    }
+                }
+                if (hasWeakNeutral) {
+                    score *= 2.0;
+                }
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestPosition = pos;
+                }
+            }
+        }
+
+        return bestPosition;
+    }
+
+    /**
+     * Trouve la meilleure spore pour créer un spawner
+     * Choisit une position avec beaucoup de nutriments environnants
+     */
+    private Spore findBestSporeForSpawner(TeamInfo myTeam, GameWorld world, String myTeamId) {
+        Spore bestSpore = null;
+        double bestScore = -1;
+
+        for (Spore spore : myTeam.spores()) {
+            if (spore.biomass() < myTeam.nextSpawnerCost()) {
+                continue; // Pas assez de biomasse
+            }
+
+            // Calculer le score basé sur la richesse du territoire environnant
+            int localNutrients = 0;
+            int radius = 5;
+
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dy = -radius; dy <= radius; dy++) {
+                    int x = spore.position().x() + dx;
+                    int y = spore.position().y() + dy;
+
+                    if (x >= 0 && x < world.map().width() &&
+                            y >= 0 && y < world.map().height()) {
+                        localNutrients += world.map().nutrientGrid()[x][y];
+                    }
+                }
+            }
+
+            if (localNutrients > bestScore) {
+                bestScore = localNutrients;
+                bestSpore = spore;
+            }
+        }
+
+        return bestSpore;
+    }
+
+    private int calculateBiomass(TeamInfo myTeam) {
+        int count = 0;
+        for (Spore spore : myTeam.spores()) {
+            count += spore.biomass();
+        }
+        return count;
+    }
+
+    private void spawn(TeamInfo myTeam, List<Action> actions, int forceDesTroupes) {
+        for (Spawner spawner : myTeam.spawners()) {
+            if (myTeam.nutrients() >= forceDesTroupes) {
+                actions.add(new SpawnerProduceSporeAction(spawner.id(), forceDesTroupes));
+            }
+        }
+    }
+
+    private double calculateDistance(Position p1, Position p2) {
+        return Math.abs(p1.x() - p2.x()) + Math.abs(p1.y() - p2.y());
+    }
+
+    private Spore trouverEnnemiProche(Spore monSpore, GameWorld world, String teamId) {
+        Spore proche = null;
+        double minDist = Double.MAX_VALUE;
+
+        for (Spore ennemi : world.spores()) {
+            if (!ennemi.teamId().equals(teamId)) {
+                double dist = calculateDistance(ennemi.position(), monSpore.position());
+                if (dist < minDist) {
+                    minDist = dist;
+                    proche = ennemi;
+                }
+            }
+        }
+
+        return proche;
+    }
 }
