@@ -55,7 +55,8 @@ public class Bot {
 
     /**
      * Trouve la meilleure tile à capturer pour une spore donnée
-     * Priorise : haute valeur nutritive, proximité, tiles non contrôlées
+     * Priorise : tuiles à 0 biomasse, haute valeur nutritive, proximité
+     * Évite : spores neutres avec biomasse > 20
      */
     private Position findBestTileToCapture(Spore spore, GameWorld world, String myTeamId) {
         Position bestPosition = null;
@@ -85,32 +86,44 @@ public class Bot {
                     continue;
                 }
 
+                // NOUVEAU: Vérifier s'il y a une spore neutre forte (>20) à cette position
+                if (hasStrongNeutralSpore(pos, world)) {
+                    continue; // Éviter complètement les spores neutres > 20
+                }
+
                 // Calculer le score de cette position
                 double distance = calculateDistance(spore.position(), pos);
                 if (distance == 0) continue;
 
                 int nutrientValue = world.map().nutrientGrid()[x][y];
+                int currentBiomass = world.biomassGrid()[x][y];
 
-                // Score = valeur nutritive / distance (prioriser les tiles proches avec haute valeur)
+                // Score de base = valeur nutritive / distance
                 double score = (nutrientValue + 1) / (distance + 1);
+
+                // BONUS MAJEUR: Tuiles à 0 biomasse (vides ou traces ennemies faibles)
+                if (currentBiomass == 0) {
+                    score *= 3.0; // Triple le score pour les tuiles vides
+                }
 
                 // Bonus si la tile n'est contrôlée par personne
                 if (owner == null || owner.isEmpty()) {
                     score *= 1.5;
                 }
 
-                // Bonus si c'est une tile avec spore neutre faible
+                // Bonus si c'est une tile avec spore neutre FAIBLE (< biomasse de notre spore)
                 boolean hasWeakNeutral = false;
                 for (Spore neutralSpore : world.spores()) {
                     if (neutralSpore.teamId() == null &&
                             neutralSpore.position().equals(pos) &&
-                            neutralSpore.biomass() < spore.biomass()) {
+                            neutralSpore.biomass() < spore.biomass() &&
+                            neutralSpore.biomass() <= 20) { // Seulement les faibles
                         hasWeakNeutral = true;
                         break;
                     }
                 }
                 if (hasWeakNeutral) {
-                    score *= 2.0;
+                    score *= 1.5; // Bonus modéré pour les neutres faibles
                 }
 
                 if (score > bestScore) {
@@ -121,6 +134,20 @@ public class Bot {
         }
 
         return bestPosition;
+    }
+
+    /**
+     * Vérifie si une position contient une spore neutre avec biomasse > 20
+     */
+    private boolean hasStrongNeutralSpore(Position pos, GameWorld world) {
+        for (Spore neutralSpore : world.spores()) {
+            if (neutralSpore.teamId() == null && // Spore neutre
+                    neutralSpore.position().equals(pos) &&
+                    neutralSpore.biomass() > 20) { // Biomasse > 20
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
